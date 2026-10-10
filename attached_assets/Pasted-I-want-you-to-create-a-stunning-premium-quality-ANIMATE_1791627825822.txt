@@ -1,0 +1,52 @@
+I want you to create a stunning, premium-quality ANIMATED GIF banner for my Telegram casino bot, ROLLERS CASINO.
+
+IMPORTANT: I have already provided a reference GIF. Use it as the reference for the banner’s exact dimensions, aspect ratio, and overall layout. I want a new animated GIF, not a static image.
+
+DESIGN AND APPEARANCE
+
+Create a huge, fierce, majestic black panther as the main mascot. Give it glowing crimson-red eyes, dramatic shadows, realistic fur details, and powerful cinematic lighting.
+
+Use a luxurious black, deep-red, and metallic-gold colour scheme. Add glowing red flames, subtle smoke, floating sparks, and beautiful light reflections. The cat must look powerful, mysterious, premium, and unforgettable.
+
+TEXT ON THE BANNER
+
+Display the following text exactly:
+
+WELCOME TO
+
+ROLLERS CASINO
+
+ENTER THE GAME. OWN THE NIGHT.
+
+ROLLERS • OFFICIAL CASINO BOT
+
+Make “ROLLERS CASINO” large, bold, stylish, and highly readable. Use metallic silver lettering with crimson-red highlights and a premium glow. Make the tagline elegant gold.
+
+Position the panther prominently on the left and the text beautifully on the right, similar to the reference layout. Ensure the design looks balanced and professional.
+
+ANIMATION REQUIREMENTS
+
+This MUST be a real animated GIF.
+
+Animate the panther’s glowing eyes, flowing flames, drifting smoke, floating sparks, and metallic reflections on the text. Add subtle movement and cinematic lighting effects to make the banner feel alive.
+
+Make the animation smooth, elegant, and seamlessly looping. Avoid excessive flashing or distracting movements.
+
+TECHNICAL REQUIREMENTS
+
+1. Inspect the reference GIF and preserve its exact pixel dimensions and aspect ratio.
+2. Create the artwork and animation frames, then combine them into a genuine animated GIF.
+3. Optimize the GIF for fast loading and smooth playback in Telegram.
+4. Keep every word sharp, correctly spelled, and within the banner margins.
+5. Verify that the finished file contains multiple frames and actually animates.
+6. Do not deliver only a PNG, JPG, static preview, or video.
+
+INTEGRATION INTO MY BOT
+
+Inspect my existing Telegram casino bot code and identify how the current welcome banner is displayed.
+
+Replace only the existing welcome banner with the new animated GIF. Preserve all existing menu buttons, layouts, commands, casino features, and functionality.
+
+Test the final GIF in the existing implementation and confirm that it displays correctly and animates in Telegram.
+
+FINAL GOAL: A visually stunning, luxurious, professionally animated ROLLERS CASINO welcome banner featuring a giant black panther, glowing red eyes, cinematic flames, and beautiful premium typography. Create the actual GIF and integrate it into my existing bot rather than just explaining how to make it.

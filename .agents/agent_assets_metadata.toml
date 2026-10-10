@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "o5FI9NpJeE9kXbiGjpgFn"
+uri = "file://telegram-helpdesk-workspace/assets/casino_ui/rollers_menu_banner.gif"
+type = "image"
+title = "ROLLERS CASINO animated welcome banner"
+description = "900×590 animated GIF with 24 looping frames, integrated as the Telegram bot's /start welcome banner."
+logical_id = "fb692e73-f465-4a43-9841-2f4092150e08"
+content_hash = "sha256:4fab64cfd71d5567774fcc40a1d9e2955badce1640df117b64669560d69facb3"
+size = 380696
+mtime_ms = 1791628215404
+storage_uri = "gcs://replit-rams-assets-pike/rams/assets/repl:bdf2d2f2-13ae-4ee0-806f-2409003f6ecb/fb692e73-f465-4a43-9841-2f4092150e08/3dd863b1-e299-439d-b261-ddf8cc7bc810"
+storage_version_token = "1791628311539997"
+content_type = "image/gif"
