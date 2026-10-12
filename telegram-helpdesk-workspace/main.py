@@ -2023,6 +2023,10 @@ BOT_TOKEN = (
     or os.environ.get("TELEGRAM_BOT_TOKEN", "")
     or os.environ.get("BOT_TOKEN", "")
 ).strip()
+GIVEAWAY_BOT_TOKEN = os.environ.get("GIVEAWAY_BOT_TOKEN", "").strip()
+GIVEAWAY_BOT_APP = None
+GIVEAWAY_BOT_USERNAME = ""
+MAIN_BOT_ID = None
 TELEGRAM_API_ID = os.environ.get("TELEGRAM_API_ID", "").strip()
 TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "").strip()
 DEALER_BOT_TOKEN = os.environ.get("DEALER_BOT_TOKEN", "")
@@ -2418,9 +2422,52 @@ CASINO_UI_ASSETS = {
 }
 
 WELCOME_BANNER_PATH = CASINO_UI_ASSETS["menu"]
-WELCOME_BANNER_ANIMATION_PATH = os.path.join(CASINO_ASSET_DIR, "rollers_menu_banner.gif")
+CASINO_UI_ANIMATION_BASES = {
+    "menu": os.path.join(CASINO_ASSET_DIR, "rollers_menu_banner"),
+    "deposit": os.path.join(CASINO_ASSET_DIR, "deposit_currency_banner"),
+    "bonus": os.path.join(CASINO_ASSET_DIR, "bonus_center_banner"),
+    "profile": os.path.join(CASINO_ASSET_DIR, "profile_account_banner"),
+    "crypto_bonus": os.path.join(CASINO_ASSET_DIR, "crypto_bonus_banner"),
+}
+CASINO_BANNER_SLOT_LABELS = {
+    "menu": "Main menu",
+    "deposit": "Deposit",
+    "bonus": "Bonus center",
+    "profile": "Player profile",
+    "crypto_bonus": "Crypto bonus",
+}
+WELCOME_BANNER_ANIMATION_PATH = CASINO_UI_ANIMATION_BASES["menu"] + ".gif"
 DEPOSIT_BANNER_PATH = CASINO_UI_ASSETS["deposit"]
 DEPOSIT_ALT_BANNER_PATH = CASINO_UI_ASSETS["deposit"]
+
+def _casino_animation_path(slot: str) -> str | None:
+    """Return the uploaded GIF/MP4 animation for a banner slot, if present."""
+    base = CASINO_UI_ANIMATION_BASES.get(str(slot))
+    if not base:
+        return None
+    for extension in (".gif", ".mp4"):
+        path = base + extension
+        try:
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def _casino_banner_media(slot: str) -> tuple[str | None, str | None]:
+    """Return (media kind, file path), preferring the owner-uploaded animation."""
+    animation_path = _casino_animation_path(slot)
+    if animation_path:
+        return "animation", animation_path
+    photo_path = CASINO_UI_ASSETS.get(str(slot))
+    if photo_path:
+        try:
+            if os.path.isfile(photo_path) and os.path.getsize(photo_path) > 0:
+                return "photo", photo_path
+        except OSError:
+            pass
+    return None, None
 
 # These images are part of the bot UI, not disposable chat attachments. They
 # are tracked inside the repository under assets/casino_ui, so every menu,
@@ -2499,11 +2546,17 @@ async def crypto_deposit_start(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
         # The banner is optional.  Do not let a missing local asset break the
         # actual deposit flow or leave the Telegram callback spinning forever.
-        if os.path.isfile(DEPOSIT_BANNER_PATH):
+        _deposit_media_kind, _deposit_media_path = _casino_banner_media("deposit")
+        if _deposit_media_path:
             try:
-                with open(DEPOSIT_BANNER_PATH, "rb") as img:
+                with open(_deposit_media_path, "rb") as img:
+                    _media = (
+                        InputMediaAnimation(media=img)
+                        if _deposit_media_kind == "animation"
+                        else InputMediaPhoto(media=img)
+                    )
                     await query.edit_message_media(
-                        media=InputMediaPhoto(media=img),
+                        media=_media,
                         reply_markup=coin_keyboard()
                     )
                     return
@@ -2526,13 +2579,20 @@ async def crypto_deposit_start(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode=ParseMode.HTML,
             )
     else:
-        if os.path.isfile(DEPOSIT_BANNER_PATH):
+        _deposit_media_kind, _deposit_media_path = _casino_banner_media("deposit")
+        if _deposit_media_path:
             try:
-                with open(DEPOSIT_BANNER_PATH, "rb") as img:
-                    await update.message.reply_photo(
-                        photo=img,
-                        reply_markup=coin_keyboard()
-                    )
+                with open(_deposit_media_path, "rb") as img:
+                    if _deposit_media_kind == "animation":
+                        await update.message.reply_animation(
+                            animation=img,
+                            reply_markup=coin_keyboard(),
+                        )
+                    else:
+                        await update.message.reply_photo(
+                            photo=img,
+                            reply_markup=coin_keyboard(),
+                        )
                     return
             except Exception as exc:
                 logger.warning("Could not send deposit banner: %s", exc)
@@ -6558,6 +6618,7 @@ class UserState:
     # Owner panel live setting prompts
     OWNER_MIN_BET = "owner_min_bet"
     OWNER_MIN_WITHDRAWAL = "owner_min_withdrawal"
+    OWNER_BANNER_UPLOAD = "owner_banner_upload"
     # INR / UPI deposit states
     INR_WAITING_AMOUNT = "inr_waiting_amount"
     INR_WAITING_PROOF  = "inr_waiting_proof"
@@ -9409,9 +9470,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = _main_menu_keyboard(user_id)
 
     welcome_caption = _main_menu_caption(user_id)
-    if os.path.isfile(WELCOME_BANNER_ANIMATION_PATH):
+    _welcome_animation_path = _casino_animation_path("menu")
+    if _welcome_animation_path:
         try:
-            with open(WELCOME_BANNER_ANIMATION_PATH, "rb") as animation:
+            with open(_welcome_animation_path, "rb") as animation:
                 await update.message.reply_animation(
                     animation=animation,
                     caption=welcome_caption,
@@ -13574,15 +13636,24 @@ async def crypto_bonus_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     uid = str(update.message.from_user.id)
     text, markup = _crypto_bonus_panel(uid)
-    if os.path.isfile(_CRYPTO_BONUS_BANNER_PATH):
+    _banner_kind, _banner_path = _casino_banner_media("crypto_bonus")
+    if _banner_path:
         try:
-            with open(_CRYPTO_BONUS_BANNER_PATH, "rb") as photo:
-                await update.message.reply_photo(
-                    photo=photo,
-                    caption=text,
-                    reply_markup=markup,
-                    parse_mode=ParseMode.HTML,
-                )
+            with open(_banner_path, "rb") as banner:
+                if _banner_kind == "animation":
+                    await update.message.reply_animation(
+                        animation=banner,
+                        caption=text,
+                        reply_markup=markup,
+                        parse_mode=ParseMode.HTML,
+                    )
+                else:
+                    await update.message.reply_photo(
+                        photo=banner,
+                        caption=text,
+                        reply_markup=markup,
+                        parse_mode=ParseMode.HTML,
+                    )
             return
         except Exception as exc:
             logger.warning("[CRYPTO_BONUS] Could not send banner: %s", exc)
@@ -13670,12 +13741,18 @@ async def _send_bonus_menu(target, context, is_callback: bool = False) -> None:
 
     # Back from a bonus sub-screen should restore the banner itself.  Editing
     # the callback message to media removes the large text panel entirely.
+    _banner_kind, _banner_path = _casino_banner_media("bonus")
     if is_callback:
-        if os.path.isfile(_BONUS_BANNER_PATH):
+        if _banner_path:
             try:
-                with open(_BONUS_BANNER_PATH, "rb") as photo:
+                with open(_banner_path, "rb") as banner:
+                    _media = (
+                        InputMediaAnimation(media=banner)
+                        if _banner_kind == "animation"
+                        else InputMediaPhoto(media=banner)
+                    )
                     await target.message.edit_media(
-                        media=InputMediaPhoto(media=photo),
+                        media=_media,
                         reply_markup=markup,
                     )
                 return
@@ -13693,14 +13770,21 @@ async def _send_bonus_menu(target, context, is_callback: bool = False) -> None:
             logger.warning("[BONUS] Could not restore text menu on Back: %s", exc)
         return
 
-    if os.path.isfile(_BONUS_BANNER_PATH):
+    if _banner_path:
         try:
-            with open(_BONUS_BANNER_PATH, "rb") as photo:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=photo,
-                    reply_markup=markup,
-                )
+            with open(_banner_path, "rb") as banner:
+                if _banner_kind == "animation":
+                    await context.bot.send_animation(
+                        chat_id=chat_id,
+                        animation=banner,
+                        reply_markup=markup,
+                    )
+                else:
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=banner,
+                        reply_markup=markup,
+                    )
             return
         except Exception as exc:
             logger.warning("[BONUS] Could not send bonus banner: %s", exc)
@@ -14566,15 +14650,25 @@ async def handle_crypto_deposits_menu(query, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         pass
     caption = _tr(user_id, "deposit_title")
-    if os.path.isfile(DEPOSIT_ALT_BANNER_PATH):
+    _banner_kind, _banner_path = _casino_banner_media("deposit")
+    if _banner_path:
         try:
-            with open(DEPOSIT_ALT_BANNER_PATH, "rb") as photo:
-                await query.edit_message_media(
-                    media=InputMediaPhoto(
-                        media=photo,
+            with open(_banner_path, "rb") as banner:
+                _media = (
+                    InputMediaAnimation(
+                        media=banner,
                         caption=caption,
                         parse_mode=ParseMode.HTML,
-                    ),
+                    )
+                    if _banner_kind == "animation"
+                    else InputMediaPhoto(
+                        media=banner,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                    )
+                )
+                await query.edit_message_media(
+                    media=_media,
                     reply_markup=coin_keyboard(),
                 )
             return
@@ -14585,14 +14679,23 @@ async def handle_crypto_deposits_menu(query, context: ContextTypes.DEFAULT_TYPE)
             except Exception:
                 pass
         try:
-            with open(DEPOSIT_ALT_BANNER_PATH, "rb") as photo:
-                await context.bot.send_photo(
-                    chat_id=query.message.chat_id,
-                    photo=photo,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=coin_keyboard(),
-                )
+            with open(_banner_path, "rb") as banner:
+                if _banner_kind == "animation":
+                    await context.bot.send_animation(
+                        chat_id=query.message.chat_id,
+                        animation=banner,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=coin_keyboard(),
+                    )
+                else:
+                    await context.bot.send_photo(
+                        chat_id=query.message.chat_id,
+                        photo=banner,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=coin_keyboard(),
+                    )
             return
         except Exception as exc:
             logger.warning("Could not send saved deposit menu banner: %s", exc)
@@ -15201,6 +15304,35 @@ async def handle_np_withdrawal_address(update: Update, context: ContextTypes.DEF
     finally:
         _processing_np_withdrawals.discard(user_id)
 
+def build_crypto_withdrawal_keyboard(
+    back_callback: str = "back_to_menu",
+    include_cc_tip: bool = True,
+) -> InlineKeyboardMarkup:
+    """Build the same two-column withdrawal picker for menu and slash commands."""
+    coins = [
+        code
+        for code in SUPPORTED_CRYPTOCURRENCIES
+        if NOWPAYMENTS_CURRENCY_MAP.get(code)
+    ]
+    keyboard = []
+    for index in range(0, len(coins), 2):
+        row = []
+        for code in coins[index:index + 2]:
+            info = SUPPORTED_CRYPTOCURRENCIES[code]
+            emoji = CRYPTO_DISPLAY_EMOJI.get(code, "🪙")
+            row.append(InlineKeyboardButton(
+                f"{emoji} {info['name']} ({code})",
+                callback_data=f"crypto_withdraw_{code}",
+            ))
+        keyboard.append(row)
+    if include_cc_tip:
+        keyboard.append([
+            InlineKeyboardButton("💸 CC Tip Withdrawal", callback_data="cctip_menu")
+        ])
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=back_callback)])
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def handle_crypto_withdrawals_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle crypto withdrawals menu from main menu."""
     user_id = str(query.from_user.id)
@@ -15242,29 +15374,13 @@ async def handle_crypto_withdrawals_menu(query, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    # Main withdrawal coins shown in 2-column layout matching the UI
-    WITHDRAW_COINS = [
-        ("Litecoin (LTC)", "LTC"),
-        ("Ethereum (ETH)", "ETH"),
-        ("Toncoin (TON)", "TON"),
-        ("Solana (SOL)", "SOL"),
-    ]
-    keyboard = []
-    for i in range(0, len(WITHDRAW_COINS), 2):
-        row = []
-        row.append(InlineKeyboardButton(WITHDRAW_COINS[i][0], callback_data=f"crypto_withdraw_{WITHDRAW_COINS[i][1]}"))
-        if i + 1 < len(WITHDRAW_COINS):
-            row.append(InlineKeyboardButton(WITHDRAW_COINS[i+1][0], callback_data=f"crypto_withdraw_{WITHDRAW_COINS[i+1][1]}"))
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("USDT (ERC20)", callback_data="crypto_withdraw_USDT")])
-    keyboard.append([InlineKeyboardButton("💸 CC Tip Withdrawal", callback_data="cctip_menu")])
-    keyboard.append([InlineKeyboardButton("⬅️ BACK", callback_data="back_to_menu")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = build_crypto_withdrawal_keyboard()
 
     withdrawal_message = (
         f"💸 <b>Withdraw</b>\n\n"
         f"Your current balance: <b>{format_balance_in_currency(balance, user_currency)}</b>\n\n"
-        f"Choose the cryptocurrency you want to withdraw into:\n\n"
+        f"Choose from {len(SUPPORTED_CRYPTOCURRENCIES)} supported cryptocurrencies. "
+        f"Stablecoins and multi-network coins will ask you to choose a network.\n\n"
         f"💡 <b>CC Tip Withdrawal</b> — instant withdrawal via CC tip to your Telegram account"
     )
 
@@ -17138,10 +17254,6 @@ def get_biggest_win(user_id: str, currency: str) -> str:
     biggest = max(wins) if wins else 0.0
     return format_balance_in_currency(biggest, currency)
 
-_DR_PROFILE_PHOTO_PATH = os.path.join(
-    CASINO_ASSET_DIR, "profile_account_banner.jpeg"
-)
-
 def _profile_action_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [success_btn("Top users", callback_data="profile_topusers", icon_custom_emoji_id="6305315833694395868")],
@@ -17188,14 +17300,25 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f'<tg-emoji emoji-id="5438384802484998938">🕒</tg-emoji> Registration date: <b>{reg_date}</b>'
     )
 
+    _banner_kind, _banner_path = _casino_banner_media("profile")
     try:
-        with open(_DR_PROFILE_PHOTO_PATH, "rb") as photo_f:
-            await update.message.reply_photo(
-                photo       = photo_f,
-                caption     = caption,
-                parse_mode  = ParseMode.HTML,
-                reply_markup= _profile_action_keyboard(),
-            )
+        if not _banner_path:
+            raise FileNotFoundError("Profile banner is not available")
+        with open(_banner_path, "rb") as banner:
+            if _banner_kind == "animation":
+                await update.message.reply_animation(
+                    animation=banner,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_profile_action_keyboard(),
+                )
+            else:
+                await update.message.reply_photo(
+                    photo=banner,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_profile_action_keyboard(),
+                )
     except Exception:
         # Fall back to text-only if the image can't be loaded
         await update.message.reply_text(
@@ -29079,7 +29202,7 @@ async def try_manager_action(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if not duration_seconds:
             duration_seconds, duration_display = 1800, "30 minutes"
 
-        giveaway_id = str(int(time.time()))
+        giveaway_id = f"{context.bot.id}_{uuid.uuid4().hex[:12]}"
         end_time = time.time() + duration_seconds
 
         active_giveaways[giveaway_id] = {
@@ -29091,7 +29214,8 @@ async def try_manager_action(update: Update, context: ContextTypes.DEFAULT_TYPE,
             'participants': [],
             'chat_id': chat_id,
             'message_id': None,
-            'winner': None
+            'winner': None,
+            'bot_id': context.bot.id,
         }
 
         keyboard = [[InlineKeyboardButton("🎁 JOIN GIVEAWAY", callback_data=f"join_giveaway_{giveaway_id}")]]
@@ -29731,6 +29855,49 @@ async def _premium_bot_star_balance(bot) -> int:
     if amount < 0:
         raise ValueError("Telegram returned a negative Stars balance")
     return amount
+
+
+async def giveaway_bot_start_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    message = update.effective_message
+    if not message:
+        return
+    await message.reply_text(
+        "This bot hosts Rollers giveaways and sends owner-approved Telegram Premium gifts.\n\n"
+        "Join a giveaway using its button. Owner controls: /giveaway, /endgiveaway, "
+        "/giveawaylist, /giftpremium, and /stars."
+    )
+
+
+async def giveaway_bot_stars_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show the separate giveaway bot's available Telegram Stars to the owner."""
+    message = update.effective_message
+    sender = update.effective_user
+    chat = update.effective_chat
+    if not message or not sender or not chat:
+        return
+    if int(sender.id) != int(OWNER_ID):
+        await message.reply_text("This command is available to the bot owner only.")
+        return
+    if chat.type != "private":
+        await message.reply_text("Use /stars in a private chat with the giveaway bot.")
+        return
+    try:
+        balance = await _premium_bot_star_balance(context.bot)
+        await message.reply_text(
+            f"🎁 Giveaway bot Stars balance: <b>{balance:,} Stars</b>",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        _premium_gift_logger.warning(
+            "Could not read giveaway bot Stars balance (%s)", type(exc).__name__
+        )
+        await message.reply_text(
+            "Telegram did not return the giveaway bot's Stars balance. Please try again later."
+        )
 
 
 async def gift_premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -30859,9 +31026,12 @@ async def _edit_callback_text_or_send(
     reply_markup=None,
     parse_mode=None,
 ) -> None:
-    """Edit callback text screens, replacing a photo message when necessary."""
+    """Edit callback screens, replacing media messages when text editing is unsupported."""
     message = query.message
-    if message and getattr(message, "photo", None):
+    if message and any(
+        getattr(message, media_field, None)
+        for media_field in ("photo", "animation", "video", "document")
+    ):
         try:
             await message.delete()
         except Exception:
@@ -30968,9 +31138,10 @@ async def show_main_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = _main_menu_keyboard(user_id)
 
     welcome_caption = _main_menu_caption(user_id)
-    if os.path.isfile(WELCOME_BANNER_ANIMATION_PATH):
+    _welcome_animation_path = _casino_animation_path("menu")
+    if _welcome_animation_path:
         try:
-            with open(WELCOME_BANNER_ANIMATION_PATH, "rb") as animation:
+            with open(_welcome_animation_path, "rb") as animation:
                 await query.edit_message_media(
                     media=InputMediaAnimation(
                         media=animation,
@@ -30987,7 +31158,7 @@ async def show_main_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 pass
         try:
-            with open(WELCOME_BANNER_ANIMATION_PATH, "rb") as animation:
+            with open(_welcome_animation_path, "rb") as animation:
                 await context.bot.send_animation(
                     chat_id=query.message.chat_id,
                     animation=animation,
@@ -32009,6 +32180,8 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
          InlineKeyboardButton("📢 Broadcast",       callback_data="owner_broadcast")],
         [InlineKeyboardButton("⚙️ Settings",        callback_data="owner_settings"),
          InlineKeyboardButton("🎫 Bonus Codes",     callback_data="owner_bonus_codes")],
+        [InlineKeyboardButton("🖼 GIF Banners",      callback_data="owner_banners"),
+         InlineKeyboardButton("🎁 Giveaway Bot",    callback_data="owner_giveaway_bot")],
         [InlineKeyboardButton("🎯 Set Min Bet",      callback_data="owner_set_min_bet"),
          InlineKeyboardButton("📤 Set Min Withdrawal", callback_data="owner_set_min_withdrawal")],
         [InlineKeyboardButton("🗑️ Tip Locks",       callback_data="owner_tip_locks"),
@@ -32026,6 +32199,101 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(panel_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+
+async def handle_owner_banner_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save an owner-uploaded GIF/Telegram animation for the selected banner slot."""
+    message = update.effective_message
+    sender = update.effective_user
+    if not message or not sender:
+        return
+
+    user_id = str(sender.id)
+    if user_states.get(user_id) != UserState.OWNER_BANNER_UPLOAD:
+        return
+    if not is_owner_or_manager(sender.id):
+        user_states[user_id] = UserState.NONE
+        user_states.pop(f"{user_id}_banner_slot", None)
+        await message.reply_text("Owner access is required to change banner media.")
+        raise ApplicationHandlerStop
+
+    slot = user_states.get(f"{user_id}_banner_slot")
+    if slot not in CASINO_UI_ANIMATION_BASES:
+        user_states[user_id] = UserState.NONE
+        user_states.pop(f"{user_id}_banner_slot", None)
+        await message.reply_text("That banner upload session expired. Open /panel and try again.")
+        raise ApplicationHandlerStop
+
+    media = message.animation or message.document
+    if not media:
+        await message.reply_text(
+            "Please upload a GIF as an animation or as a .gif file. "
+            "Photos and ordinary videos are not accepted."
+        )
+        raise ApplicationHandlerStop
+
+    mime_type = str(getattr(media, "mime_type", "") or "").lower()
+    file_name = str(getattr(media, "file_name", "") or "").lower()
+    is_animation = message.animation is not None
+    if is_animation and (mime_type == "video/mp4" or file_name.endswith(".mp4")):
+        extension = ".mp4"
+    elif mime_type == "image/gif" or file_name.endswith(".gif"):
+        extension = ".gif"
+    else:
+        await message.reply_text(
+            "This file does not look like a GIF. Send an animated GIF or a Telegram animation."
+        )
+        raise ApplicationHandlerStop
+
+    size = getattr(media, "file_size", None)
+    if size is not None and int(size) > 15 * 1024 * 1024:
+        await message.reply_text("That animation is over the 15 MB upload limit. Please send a smaller GIF.")
+        raise ApplicationHandlerStop
+
+    base_path = CASINO_UI_ANIMATION_BASES[slot]
+    temp_path = f"{base_path}.upload-{uuid.uuid4().hex}{extension}"
+    target_path = base_path + extension
+    try:
+        telegram_file = await context.bot.get_file(media.file_id)
+        await telegram_file.download_to_drive(custom_path=temp_path)
+        downloaded_size = os.path.getsize(temp_path)
+        if downloaded_size <= 0 or downloaded_size > 15 * 1024 * 1024:
+            raise ValueError("Animation file is empty or exceeds the upload limit.")
+        with open(temp_path, "rb") as uploaded:
+            header = uploaded.read(12)
+        if extension == ".gif" and header[:6] not in (b"GIF87a", b"GIF89a"):
+            raise ValueError("The uploaded GIF file is invalid.")
+        if extension == ".mp4" and header[4:8] != b"ftyp":
+            raise ValueError("The uploaded Telegram animation is invalid.")
+
+        os.replace(temp_path, target_path)
+        for other_extension in (".gif", ".mp4"):
+            other_path = base_path + other_extension
+            if other_path != target_path:
+                try:
+                    os.remove(other_path)
+                except FileNotFoundError:
+                    pass
+        user_states[user_id] = UserState.NONE
+        user_states.pop(f"{user_id}_banner_slot", None)
+        save_data()
+        await message.reply_text(
+            f"✅ {CASINO_BANNER_SLOT_LABELS[slot]} banner animation saved. "
+            "The existing image remains as a fallback."
+        )
+    except Exception as exc:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        logger.warning(
+            "[BANNERS] Could not save %s animation (%s)",
+            slot,
+            type(exc).__name__,
+        )
+        await message.reply_text(
+            "I couldn't save that animation. Your current banner is unchanged; please try again with a valid GIF."
+        )
+        raise ApplicationHandlerStop
 
 def parse_duration(duration_str: str) -> tuple:
     """Parse flexible duration format. Returns (seconds, display_text)."""
@@ -32175,7 +32443,7 @@ async def smartgiveaway_command(update: Update, context: ContextTypes.DEFAULT_TY
         
         professional_text = await generate_professional_giveaway_text(amount, duration_display, reason)
         
-        giveaway_id = str(int(time.time()))
+        giveaway_id = f"{context.bot.id}_{uuid.uuid4().hex[:12]}"
         end_time = time.time() + duration_seconds
         
         active_giveaways[giveaway_id] = {
@@ -32189,7 +32457,8 @@ async def smartgiveaway_command(update: Update, context: ContextTypes.DEFAULT_TY
             'message_id': None,
             'winner': None,
             'ai_generated': True,
-            'original_text': professional_text
+            'original_text': professional_text,
+            'bot_id': context.bot.id,
         }
         
         keyboard = [[InlineKeyboardButton("🎁 JOIN GIVEAWAY", callback_data=f"join_giveaway_{giveaway_id}")]]
@@ -32369,6 +32638,15 @@ async def join_giveaway_callback(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         pass
 
+def _giveaway_belongs_to_bot(giveaway: dict, bot) -> bool:
+    stored_bot_id = giveaway.get("bot_id")
+    if stored_bot_id is not None:
+        return str(stored_bot_id) == str(getattr(bot, "id", ""))
+    # Pre-existing giveaways did not store a bot ID, so treat them as belonging
+    # to the original casino bot rather than exposing them to the new bot.
+    return MAIN_BOT_ID is None or str(getattr(bot, "id", "")) == str(MAIN_BOT_ID)
+
+
 async def endgiveaway_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """End current giveaway early."""
     if not update.message or not update.message.from_user:
@@ -32378,12 +32656,17 @@ async def endgiveaway_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Owner only command.")
         return
     
-    if not active_giveaways:
+    owned_giveaways = [
+        (giveaway_id, giveaway)
+        for giveaway_id, giveaway in active_giveaways.items()
+        if _giveaway_belongs_to_bot(giveaway, context.bot)
+    ]
+    if not owned_giveaways:
         await update.message.reply_text("❌ No active giveaways.")
         return
     
     # End the most recent giveaway
-    giveaway_id = list(active_giveaways.keys())[-1]
+    giveaway_id = owned_giveaways[-1][0]
     await finish_giveaway(context, giveaway_id)
     await update.message.reply_text("✅ Giveaway ended and winner selected!")
 
@@ -32396,12 +32679,17 @@ async def giveawaylist_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ Owner only command.")
         return
     
-    if not active_giveaways:
+    owned_giveaways = [
+        (giveaway_id, giveaway)
+        for giveaway_id, giveaway in active_giveaways.items()
+        if _giveaway_belongs_to_bot(giveaway, context.bot)
+    ]
+    if not owned_giveaways:
         await update.message.reply_text("❌ No active giveaways.")
         return
     
     msg = "🎁 <b>ACTIVE GIVEAWAYS</b>\n\n"
-    for gid, giveaway in active_giveaways.items():
+    for gid, giveaway in owned_giveaways:
         remaining = int((giveaway['end_time'] - time.time()) / 60)
         remaining = max(0, remaining)
         msg += f"• ID: {gid}\n"
@@ -32511,7 +32799,7 @@ async def periodic_group_giveaway_task(app):
     
     while periodic_group_giveaway['enabled']:
         try:
-            giveaway_id = f"group_{int(time.time())}"
+            giveaway_id = f"{app.bot.id}_group_{uuid.uuid4().hex[:10]}"
             amount = periodic_group_giveaway['amount']
             end_time = time.time() + (24 * 60 * 60)  # 24 hour giveaway
             
@@ -32525,7 +32813,8 @@ async def periodic_group_giveaway_task(app):
                 'chat_id': group_chat_id,
                 'message_id': None,
                 'winner': None,
-                'is_periodic': True
+                'is_periodic': True,
+                'bot_id': app.bot.id,
             }
             
             giveaway_text = (
@@ -33072,6 +33361,121 @@ async def handle_owner_panel_callbacks(query, context: ContextTypes.DEFAULT_TYPE
         return
     
     data = query.data
+
+    if data == "owner_banners":
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        lines = [
+            "Choose a banner slot, then send a GIF or Telegram animation (up to 15 MB).",
+            "The existing still image is kept as the fallback.",
+            "",
+        ]
+        keyboard = []
+        for slot, label in CASINO_BANNER_SLOT_LABELS.items():
+            status = "✅ Animation set" if _casino_animation_path(slot) else "🖼 Still image"
+            lines.append(f"• <b>{label}:</b> {status}")
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🎞 {label}",
+                    callback_data=f"owner_banner_slot_{slot}",
+                )
+            ])
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="owner_back")])
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith("owner_banner_slot_"):
+        slot = data.removeprefix("owner_banner_slot_")
+        if slot not in CASINO_UI_ANIMATION_BASES:
+            await query.answer("Unknown banner slot.", show_alert=True)
+            return
+        user_states[user_id] = UserState.OWNER_BANNER_UPLOAD
+        user_states[f"{user_id}_banner_slot"] = slot
+        await query.answer()
+        await query.edit_message_text(
+            f"Upload the GIF for <b>{CASINO_BANNER_SLOT_LABELS[slot]}</b> now.\n\n"
+            "Send it as an animated GIF or a .gif file (max 15 MB). "
+            "The current still image stays available as a fallback.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("Cancel", callback_data="owner_banner_cancel")
+            ]]),
+        )
+        return
+
+    if data == "owner_banner_cancel":
+        user_states[user_id] = UserState.NONE
+        user_states.pop(f"{user_id}_banner_slot", None)
+        data = "owner_back"
+
+    if data == "owner_giveaway_bot":
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        if not GIVEAWAY_BOT_TOKEN:
+            text = (
+                "🎁 <b>Giveaway & Premium Gift Bot</b>\n\n"
+                "Not connected yet. Add the bot's token as the Replit Secret "
+                "<code>GIVEAWAY_BOT_TOKEN</code> to start it.\n\n"
+                "The token is never shown in this panel."
+            )
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="owner_back")]]
+        elif not GIVEAWAY_BOT_APP:
+            text = (
+                "🎁 <b>Giveaway & Premium Gift Bot</b>\n\n"
+                "A token is configured, but the bot is not running. "
+                "Check the server logs for its startup status."
+            )
+            keyboard = [[InlineKeyboardButton("↻ Refresh", callback_data="owner_giveaway_bot")],
+                        [InlineKeyboardButton("« Back", callback_data="owner_back")]]
+        else:
+            try:
+                bot_info = await GIVEAWAY_BOT_APP.bot.get_me()
+                stars = await _premium_bot_star_balance(GIVEAWAY_BOT_APP.bot)
+                username = str(getattr(bot_info, "username", "") or GIVEAWAY_BOT_USERNAME)
+                text = (
+                    "🎁 <b>Giveaway & Premium Gift Bot</b>\n\n"
+                    f"Bot: <b>@{username}</b>\n"
+                    f"Available Stars: <b>{stars:,}</b>\n\n"
+                    "Use /giveaway [amount] [duration] [reason] to host a giveaway, "
+                    "/giftpremium to gift Telegram Premium, and /stars to recheck the balance."
+                )
+                keyboard = []
+                if username:
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            "Open giveaway bot",
+                            url=f"https://t.me/{username}",
+                        )
+                    ])
+                keyboard.extend([
+                    [InlineKeyboardButton("↻ Refresh balance", callback_data="owner_giveaway_bot")],
+                    [InlineKeyboardButton("« Back", callback_data="owner_back")],
+                ])
+            except Exception as exc:
+                logger.warning(
+                    "[GIVEAWAY_BOT] Owner panel balance check failed (%s)",
+                    type(exc).__name__,
+                )
+                text = (
+                    "🎁 <b>Giveaway & Premium Gift Bot</b>\n\n"
+                    "The bot is configured, but Telegram did not return its current Stars balance. "
+                    "Use /stars in the giveaway bot to retry."
+                )
+                keyboard = [[InlineKeyboardButton("« Back", callback_data="owner_back")]]
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
     
     if data == "owner_stats":
         total_users = len(user_balances) + USER_COUNT_OFFSET
@@ -33130,6 +33534,8 @@ async def handle_owner_panel_callbacks(query, context: ContextTypes.DEFAULT_TYPE
                  InlineKeyboardButton("📢 Broadcast",   callback_data="owner_broadcast")],
                 [InlineKeyboardButton("⚙️ Settings",    callback_data="owner_settings"),
                  InlineKeyboardButton("🎫 Bonus Codes", callback_data="owner_bonus_codes")],
+                [InlineKeyboardButton("🖼 GIF Banners", callback_data="owner_banners"),
+                 InlineKeyboardButton("🎁 Giveaway Bot", callback_data="owner_giveaway_bot")],
                  [InlineKeyboardButton("🎯 Set Min Bet",  callback_data="owner_set_min_bet"),
                   InlineKeyboardButton("📤 Set Min Withdrawal", callback_data="owner_set_min_withdrawal")],
                 [InlineKeyboardButton("🗑️ Tip Locks",   callback_data="owner_tip_locks"),
@@ -33162,7 +33568,7 @@ async def handle_owner_panel_callbacks(query, context: ContextTypes.DEFAULT_TYPE
             amount = float(parts[0])
             duration = int(parts[1])
             
-            giveaway_id = str(int(time.time()))
+            giveaway_id = f"{context.bot.id}_{uuid.uuid4().hex[:12]}"
             end_time = time.time() + (duration * 60)
             
             active_giveaways[giveaway_id] = {
@@ -33172,7 +33578,8 @@ async def handle_owner_panel_callbacks(query, context: ContextTypes.DEFAULT_TYPE
                 'participants': [],
                 'chat_id': query.message.chat_id,
                 'message_id': None,
-                'winner': None
+                'winner': None,
+                'bot_id': context.bot.id,
             }
             
             keyboard = [[InlineKeyboardButton("🎁 JOIN GIVEAWAY", callback_data=f"join_giveaway_{giveaway_id}")]]
@@ -34251,6 +34658,8 @@ async def handle_owner_panel_callbacks(query, context: ContextTypes.DEFAULT_TYPE
              InlineKeyboardButton("📢 Broadcast",       callback_data="owner_broadcast")],
             [InlineKeyboardButton("⚙️ Settings",        callback_data="owner_settings"),
              InlineKeyboardButton("🎫 Bonus Codes",     callback_data="owner_bonus_codes")],
+        [InlineKeyboardButton("🖼 GIF Banners",      callback_data="owner_banners"),
+         InlineKeyboardButton("🎁 Giveaway Bot",    callback_data="owner_giveaway_bot")],
             [InlineKeyboardButton("🎯 Set Min Bet",      callback_data="owner_set_min_bet"),
              InlineKeyboardButton("📤 Set Min Withdrawal", callback_data="owner_set_min_withdrawal")],
             [InlineKeyboardButton("🗑️ Tip Locks",       callback_data="owner_tip_locks"),
@@ -36992,22 +37401,14 @@ async def withdrawal_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    keyboard = []
-    for i in range(0, len(WITHDRAWAL_OPTIONS), 2):
-        row = []
-        for j in range(2):
-            if i + j < len(WITHDRAWAL_OPTIONS):
-                display_name, np_code = WITHDRAWAL_OPTIONS[i + j]
-                row.append(InlineKeyboardButton(display_name, callback_data=f"np_withdraw_{np_code}"))
-        keyboard.append(row)
-
-    keyboard.append([InlineKeyboardButton("BACK", callback_data="back_to_menu")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = build_crypto_withdrawal_keyboard()
 
     withdrawal_message = (
         f"💸 <b>Withdraw</b>\n\n"
         f"Your current balance: <b>{format_balance_in_currency(balance, user_currency)}</b>\n\n"
-        f"Choose the cryptocurrency you want to withdraw into:"
+        f"Choose from {len(SUPPORTED_CRYPTOCURRENCIES)} supported cryptocurrencies. "
+        f"Stablecoins and multi-network coins will ask you to choose a network.\n\n"
+        f"CC Tip withdrawal is also available below."
     )
 
     await update.message.reply_text(withdrawal_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -37605,6 +38006,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     _handler_user_cv.set(user_id)
     text = update.message.text
     if not text: return
+
+    if user_states.get(user_id) == UserState.OWNER_BANNER_UPLOAD:
+        if not is_owner_or_manager(update.message.from_user.id):
+            user_states[user_id] = UserState.NONE
+            user_states.pop(f"{user_id}_banner_slot", None)
+            await update.message.reply_text("Owner access is required to change banner media.")
+        else:
+            await update.message.reply_text(
+                "This banner is waiting for an animated GIF upload. "
+                "Send a GIF file or Telegram animation, or tap Cancel in the prompt."
+            )
+        raise ApplicationHandlerStop
 
     _custom_rejection = _PENDING_CUSTOM_WITHDRAWAL_REJECTIONS.get(user_id)
     if (
@@ -44430,6 +44843,110 @@ def _start_autosave():
     try: logger.info("Autosave thread started — saving every 5s if dirty (non-blocking)")
     except Exception: pass
 
+async def _start_giveaway_bot() -> None:
+    """Start the optional second Telegram bot used only for giveaways and Premium gifts."""
+    global GIVEAWAY_BOT_APP, GIVEAWAY_BOT_USERNAME
+    if not GIVEAWAY_BOT_TOKEN:
+        logger.info("[GIVEAWAY_BOT] Optional secondary bot is not configured")
+        return
+    if GIVEAWAY_BOT_TOKEN == BOT_TOKEN:
+        logger.error("[GIVEAWAY_BOT] Secondary token matches the main bot; refusing duplicate polling")
+        return
+
+    secondary = None
+    try:
+        secondary = (
+            Application.builder()
+            .token(GIVEAWAY_BOT_TOKEN)
+            .concurrent_updates(True)
+            .build()
+        )
+        secondary.add_handler(CommandHandler("start", giveaway_bot_start_command))
+        secondary.add_handler(CommandHandler("stars", giveaway_bot_stars_command))
+        secondary.add_handler(
+            CommandHandler(["giveaway", "smartgiveaway"], smartgiveaway_command)
+        )
+        secondary.add_handler(CommandHandler("endgiveaway", endgiveaway_command))
+        secondary.add_handler(CommandHandler("giveawaylist", giveawaylist_command))
+        secondary.add_handler(CommandHandler("giftpremium", gift_premium_command))
+        secondary.add_handler(
+            CallbackQueryHandler(
+                gift_premium_callback,
+                pattern=r"^owner_premiumgift_(?:confirm|cancel):[0-9a-f]{16}$",
+            )
+        )
+        secondary.add_handler(
+            CallbackQueryHandler(join_giveaway_callback, pattern=r"^join_giveaway_")
+        )
+
+        await secondary.initialize()
+        await secondary.bot.set_my_commands([
+            BotCommand("start", "Start giveaway bot"),
+            BotCommand("giveaway", "Host a giveaway"),
+            BotCommand("smartgiveaway", "Host a giveaway"),
+            BotCommand("endgiveaway", "End a giveaway"),
+            BotCommand("giveawaylist", "List active giveaways"),
+            BotCommand("giftpremium", "Gift Telegram Premium"),
+            BotCommand("stars", "Check the bot Stars balance"),
+        ])
+        await secondary.start()
+        if not secondary.updater:
+            raise RuntimeError("The secondary bot has no polling updater.")
+        await secondary.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        bot_info = await secondary.bot.get_me()
+        GIVEAWAY_BOT_USERNAME = str(getattr(bot_info, "username", "") or "")
+        GIVEAWAY_BOT_APP = secondary
+        logger.info(
+            "[GIVEAWAY_BOT] Secondary giveaway bot started as @%s",
+            GIVEAWAY_BOT_USERNAME or "unknown",
+        )
+    except Exception as exc:
+        logger.warning(
+            "[GIVEAWAY_BOT] Secondary startup failed (%s)",
+            type(exc).__name__,
+        )
+        if secondary:
+            try:
+                if secondary.updater and secondary.updater.running:
+                    await secondary.updater.stop()
+                if secondary.running:
+                    await secondary.stop()
+                await secondary.shutdown()
+            except Exception:
+                pass
+        GIVEAWAY_BOT_APP = None
+        GIVEAWAY_BOT_USERNAME = ""
+
+
+async def _stop_giveaway_bot() -> None:
+    global GIVEAWAY_BOT_APP, GIVEAWAY_BOT_USERNAME
+    secondary = GIVEAWAY_BOT_APP
+    GIVEAWAY_BOT_APP = None
+    GIVEAWAY_BOT_USERNAME = ""
+    if not secondary:
+        return
+    try:
+        if secondary.updater and secondary.updater.running:
+            await secondary.updater.stop()
+        if secondary.running:
+            await secondary.stop()
+        await secondary.shutdown()
+    except Exception as exc:
+        logger.warning("[GIVEAWAY_BOT] Shutdown cleanup failed (%s)", type(exc).__name__)
+
+
+async def _post_init_with_giveaway_bot(application) -> None:
+    global MAIN_BOT_ID
+    MAIN_BOT_ID = getattr(application.bot, "id", None)
+    await set_commands(application)
+    await _start_giveaway_bot()
+
+
+async def _post_shutdown_with_giveaway_bot(application) -> None:
+    await _stop_giveaway_bot()
+    await _close_resale_mtproto_client(application)
+
+
 def main():
     """Start the bot."""
     global application
@@ -44757,8 +45274,12 @@ def main():
     application.add_handler(CommandHandler("ownerstats", owner_stats))
     # application.add_handler(CommandHandler("deposit", cryptodeposit_command))
     # application.add_handler(CommandHandler("cryptodeposit", cryptodeposit_command))
-    application.add_handler(CommandHandler("withdrawal", withdrawal_command))
-    application.add_handler(CommandHandler("withdraw", withdrawal_command))
+    application.add_handler(
+        CommandHandler(
+            ["withdraw", "withdrawal", "withdrawcrypto", "cryptowithdrawl"],
+            withdrawal_command,
+        )
+    )
     application.add_handler(CommandHandler("addbalance", add_balance_command))
     application.add_handler(CommandHandler("removebalance", remove_balance_command))
     application.add_handler(CommandHandler("deduct", deduct_balance_command))
@@ -44789,7 +45310,6 @@ def main():
     application.add_handler(CommandHandler("setrainwager", setrainwager_command))
     application.add_handler(CommandHandler("rainrules", rainrules_command))
     application.add_handler(CommandHandler("cryptodeposit", cryptodeposit_command))
-    application.add_handler(CommandHandler("cryptowithdrawl", cryptowithdrawl_command))
     application.add_handler(CommandHandler("reportdeposit", reportdeposit_command))
     application.add_handler(CommandHandler("cryptohouse", cryptohouse_command))
     application.add_handler(CommandHandler("cryptohousebal", cryptohousebal_command))
@@ -44884,6 +45404,13 @@ def main():
     ), group=-3)
 
     # Register our specific wrappers in a higher group (-2) to ensure they catch first
+    application.add_handler(
+        MessageHandler(
+            filters.ANIMATION | filters.PHOTO | filters.Document.ALL,
+            handle_owner_banner_upload,
+        ),
+        group=-2,
+    )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_nowpayments_withdrawal_amount_wrapper), group=-2)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_nowpayments_withdrawal_address_wrapper), group=-2)
     
@@ -44993,8 +45520,8 @@ def main():
 
     # Dealer bots and background tasks are initialized in post_init (set_commands),
     # which runs inside run_polling's event loop — ensures correct event loop binding.
-    application.post_init = set_commands
-    application.post_shutdown = _close_resale_mtproto_client
+    application.post_init = _post_init_with_giveaway_bot
+    application.post_shutdown = _post_shutdown_with_giveaway_bot
 
     # Add error handler for Conflict errors (multiple instances)
     async def error_handler(update, context):
