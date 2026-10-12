@@ -3777,6 +3777,7 @@ _CRYPTO_BONUS_EXCLUDED_SOURCES = frozenset({
     "admin_addbal_deposit",
     "admin_fixdeposit",
     "startup_migration",
+    "consistency_repair",
 })
 CASINO_RANKS = [
     ('Bronze',    1,         100,        1.00,   '🛡️'),
@@ -9175,41 +9176,59 @@ def get_wagering_requirement_remaining(user_id: str) -> float:
     user_id = str(user_id)
     return user_wagering_requirements.get(user_id, 0.0)
 
+WITHDRAWAL_DEPOSIT_REQUIRED_MESSAGE = (
+    "Withdrawals require a crypto deposit or an owner-approved /botdepo credit "
+    "within the last 30 days."
+)
+
+
+def has_recent_withdrawal_qualifying_deposit(user_id: str, now: float | None = None) -> bool:
+    """Whether a verified crypto deposit or approved /botdepo is within 30 days."""
+    uid = str(user_id)
+    current_time = float(now if now is not None else time.time())
+    cutoff = current_time - CRYPTO_BONUS_WINDOW_SECONDS
+
+    for entry in user_deposit_history.get(uid, []) or []:
+        if not isinstance(entry, dict) or not _crypto_bonus_entry_is_qualifying(entry):
+            continue
+        try:
+            timestamp = float(entry.get("ts", 0) or 0)
+            amount = float(entry.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if (
+            math.isfinite(timestamp)
+            and math.isfinite(amount)
+            and cutoff <= timestamp <= current_time + 60
+            and amount > 0
+        ):
+            return True
+    return False
+
+
 def can_withdraw(user_id: str, amount: float) -> tuple[bool, str]:
-    """Check if user can withdraw the requested amount."""
+    """Check balance, minimum, and the rolling 30-day withdrawal qualification."""
     user_id = str(user_id)
     user_currency = get_user_currency(user_id)
     balance = get_user_balance(user_id)
-    remaining_requirement = get_wagering_requirement_remaining(user_id)
+
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return False, "Enter a valid withdrawal amount."
+    if not math.isfinite(amount) or amount <= 0:
+        return False, "Enter a valid withdrawal amount."
 
     # Check balance
     if balance < amount:
         return False, f"Insufficient balance! You have {format_balance_in_currency(balance, user_currency)}"
 
-    # ── Tip withdrawal restriction ────────────────────────────────────────────
-    # If user received a tip from a player with deposited balance:
-    #   • No wagering requirement, minimum $0.01
-    #   • Flag is NOT consumed here — only removed when user makes a real deposit
-    #     or via admin panel. This prevents permanent loss if withdrawal fails.
-    if user_tip_received.get(user_id):
-        # If user has since made a real deposit, clear tip flag and use normal rules
-        if player_data.get(user_id, {}).get('deposited'):
-            user_tip_received.pop(user_id, None)
-            logger.info(f"[CAN_WITHDRAW] {user_id} has real deposit — cleared tip flag, normal rules apply")
-        else:
-            if amount < 0.01:
-                return False, "Minimum withdrawal is $0.01"
-            logger.info(f"[CAN_WITHDRAW] tip recipient {user_id} — no wagering req, $0.01 min")
-            return True, "Withdrawal allowed"
-    # ─────────────────────────────────────────────────────────────────────────
-
     # Check minimum withdrawal ($5 for regular users)
     if amount < MIN_WITHDRAWAL:
         return False, f"Minimum withdrawal is {format_balance_in_currency(MIN_WITHDRAWAL, get_user_currency(user_id))}"
 
-    # Check wagering requirement ($15 minimum wager rule)
-    if remaining_requirement > 0:
-        return False, f"You must wager {format_balance_in_currency(remaining_requirement, user_currency)} more before withdrawing (minimum $15 wager required)"
+    if not has_recent_withdrawal_qualifying_deposit(user_id):
+        return False, WITHDRAWAL_DEPOSIT_REQUIRED_MESSAGE
 
     logger.debug(f"[CAN_WITHDRAW] ✅ user={user_id} amount=${amount:.2f} — allowed")
     return True, "Withdrawal allowed"
@@ -15340,20 +15359,15 @@ async def handle_crypto_withdrawals_menu(query, context: ContextTypes.DEFAULT_TY
     username = query.from_user.username or query.from_user.first_name or "Player"
     balance = get_user_balance(user_id)
 
-    # Check wagering requirements
-    remaining_requirement = get_wagering_requirement_remaining(user_id)
-
-    if remaining_requirement > 0:
+    if not has_recent_withdrawal_qualifying_deposit(user_id):
         keyboard = [[InlineKeyboardButton("🔥 Back to Menu", callback_data="back_to_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await _edit_callback_text_or_send(
             query,
             context,
-            f"❌ <b>WITHDRAWAL BLOCKED</b>\n\n"
-            f"You must wager {format_balance_in_currency(remaining_requirement, user_currency)} more before withdrawing\n"
-            f"(minimum $15 wager required)\n\n"
-            f"Play games with multiplier ✅ 1.70 to reduce requirements",
+            f"🔒 <b>30-DAY DEPOSIT REQUIRED</b>\n\n"
+            f"{WITHDRAWAL_DEPOSIT_REQUIRED_MESSAGE}",
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
@@ -15381,6 +15395,7 @@ async def handle_crypto_withdrawals_menu(query, context: ContextTypes.DEFAULT_TY
         f"Your current balance: <b>{format_balance_in_currency(balance, user_currency)}</b>\n\n"
         f"Choose from {len(SUPPORTED_CRYPTOCURRENCIES)} supported cryptocurrencies. "
         f"Stablecoins and multi-network coins will ask you to choose a network.\n\n"
+        f"✅ A qualifying deposit in the last 30 days unlocks all balance sources without a wager lock.\n\n"
         f"💡 <b>CC Tip Withdrawal</b> — instant withdrawal via CC tip to your Telegram account"
     )
 
@@ -15913,38 +15928,22 @@ async def handle_crypto_withdrawal_selection(query, context: ContextTypes.DEFAUL
         await query.edit_message_text("Cryptocurrency not supported")
         return
 
-    # ── Eligibility gate (same rules as handle_nowpayments_withdrawal) ────────
-    _cs_has_dep = bool(player_data.get(user_id, {}).get('deposited'))
-    _cs_is_tip  = bool(user_tip_received.get(user_id))
-    if not _cs_has_dep and not _cs_is_tip:
+    if not has_recent_withdrawal_qualifying_deposit(user_id):
         await query.edit_message_text(
-            "⚠️ <b>Withdrawable Balance Unavailable</b>\n\n"
-            "Only deposited funds and eligible tipped deposited balances can be withdrawn.\n"
-            "Bonus or promotional balances may require wagering before withdrawal.\n\n"
-            "Make a real deposit to unlock withdrawals.",
+            f"🔒 <b>30-DAY DEPOSIT REQUIRED</b>\n\n{WITHDRAWAL_DEPOSIT_REQUIRED_MESSAGE}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu")]]),
             parse_mode=ParseMode.HTML
         )
         return
-    _cs_wager = get_wagering_requirement_remaining(user_id)
-    if _cs_wager > 0 and not _cs_is_tip:
-        await query.edit_message_text(
-            "⚠️ <b>Withdrawable Balance Unavailable</b>\n\n"
-            "Only deposited funds and eligible tipped deposited balances can be withdrawn. "
-            "Bonus or promotional balances may require wagering before withdrawal.\n\n"
-            f"📊 Wagering remaining: <b>{format_balance_in_currency(_cs_wager, user_currency)}</b>\n\n"
-            "Play games to fulfill the requirement and unlock your withdrawal.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu")]]),
-            parse_mode=ParseMode.HTML
-        )
-        return
-    # ─────────────────────────────────────────────────────────────────────────
 
     crypto_info = SUPPORTED_CRYPTOCURRENCIES[crypto]
     user_balance = get_user_balance(user_id)
     
     # Check if this crypto has multiple networks available
     available_networks = NOWPAYMENTS_CURRENCY_MAP.get(crypto, {})
+    if not available_networks:
+        await query.edit_message_text("Withdrawal is not configured for this cryptocurrency.")
+        return
     
     if len(available_networks) > 1:
         # Show network selection buttons
@@ -16003,6 +16002,17 @@ async def handle_crypto_network_withdrawal_selection(query, context: ContextType
 
     if crypto not in SUPPORTED_CRYPTOCURRENCIES:
         await query.edit_message_text("Cryptocurrency not supported")
+        return
+
+    if network not in NOWPAYMENTS_CURRENCY_MAP.get(crypto, {}):
+        await query.edit_message_text("That withdrawal network is not available for this cryptocurrency.")
+        return
+    if not has_recent_withdrawal_qualifying_deposit(user_id):
+        await query.edit_message_text(
+            f"🔒 <b>30-DAY DEPOSIT REQUIRED</b>\n\n{WITHDRAWAL_DEPOSIT_REQUIRED_MESSAGE}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu")]]),
+            parse_mode=ParseMode.HTML
+        )
         return
 
     crypto_info = SUPPORTED_CRYPTOCURRENCIES[crypto]
@@ -16066,6 +16076,10 @@ async def handle_crypto_withdrawal_amount(update: Update, context: ContextTypes.
         if amount_usd > user_balance:
             await update.message.reply_text(f"Insufficient balance! You have {format_balance_in_currency(user_balance, user_currency)}")
             return
+        allowed, reason = can_withdraw(user_id, amount_usd)
+        if not allowed:
+            await update.message.reply_text(f"❌ {reason}")
+            return
     except ValueError:
         await update.message.reply_text("Please enter a valid number. Example: 10")
         return
@@ -16125,6 +16139,14 @@ async def handle_crypto_withdrawal_address(update: Update, context: ContextTypes
     if not crypto or not amount_usd:
         await update.message.reply_text("Session expired. Please start withdrawal process again.")
         user_states[user_id] = UserState.NONE
+        save_data()
+        return
+
+    allowed, reason = can_withdraw(user_id, amount_usd)
+    if not allowed:
+        await update.message.reply_text(f"❌ {reason}")
+        user_states[user_id] = UserState.NONE
+        user_states.pop(f"{user_id}_amount_usd", None)
         save_data()
         return
 
@@ -16582,7 +16604,7 @@ async def cctip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "💸 <b>CC Tip Withdrawal</b>\n\n"
             "Usage: <code>/cctip AMOUNT COIN</code>\n"
             "Example: <code>/cctip 36 usdt</code>\n\n"
-            "⚠️ Only <b>deposited balance</b> can be withdrawn via CC tip.\n"
+            "A crypto deposit or owner-approved <code>/botdepo</code> credit in the last 30 days unlocks all balance sources.\n"
             f"📌 Minimum: ${CC_TIP_MIN_USD:.0f}  |  Fee: {int(CC_TIP_FEE_RATE*100)}%",
             parse_mode=ParseMode.HTML
         )
@@ -16604,15 +16626,10 @@ async def cctip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    # Wagering requirement check — tip recipients bypass (tipped funds are instantly withdrawable)
-    _cctip_is_tip = bool(user_tip_received.get(user_id))
-    wager_req = get_wagering_requirement_remaining(user_id)
-    if wager_req > 0 and not _cctip_is_tip:
+    allowed, reason = can_withdraw(user_id, amount_usd)
+    if not allowed:
         await update.message.reply_text(
-            "⚠️ <b>Withdrawable Balance Unavailable</b>\n\n"
-            "Only deposited funds and eligible tipped deposited balances can be withdrawn. "
-            "Bonus or promotional balances may require wagering before withdrawal.\n\n"
-            f"📊 Wagering remaining: <b>{format_balance_in_currency(wager_req, user_currency)}</b>",
+            f"🔒 <b>Withdrawal unavailable</b>\n\n{reason}",
             parse_mode=ParseMode.HTML
         )
         return
@@ -16624,17 +16641,6 @@ async def cctip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"❌ <b>Insufficient balance</b>\n\n"
             f"Required: <b>${amount_usd:.2f}</b>\n"
             f"Available: <b>{format_balance_in_currency(balance, user_currency)}</b>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    # Only deposited (non-bonus) balance can be CC-tipped
-    total_deposited = user_deposit_totals.get(user_id, 0.0)
-    if total_deposited <= 0 or not player_data.get(user_id, {}).get('deposited'):
-        await update.message.reply_text(
-            "❌ <b>No deposited balance</b>\n\n"
-            "CC tip withdrawals require a real deposit first.\n"
-            "Bonus balance cannot be withdrawn this way.",
             parse_mode=ParseMode.HTML
         )
         return
@@ -37366,28 +37372,9 @@ async def withdrawal_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_currency = get_user_currency(user_id)
     balance = get_user_balance(user_id)
 
-    # Play-only balance gate — must have deposited or received a tip
-    _is_tip_wd = bool(user_tip_received.get(user_id))
-    _has_dep_wd = bool(player_data.get(user_id, {}).get('deposited'))
-    if not _has_dep_wd and not _is_tip_wd:
+    if not has_recent_withdrawal_qualifying_deposit(user_id):
         await update.message.reply_text(
-            "⚠️ <b>Withdrawable Balance Unavailable</b>\n\n"
-            "Only deposited funds and eligible tipped deposited balances can be withdrawn.\n"
-            "Bonus or promotional balances may require wagering before withdrawal.\n\n"
-            "Make a real deposit to unlock withdrawals.",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    # Check wagering requirement — tip recipients bypass (tipped funds withdraw instantly)
-    wager_req = get_wagering_requirement_remaining(user_id)
-    if wager_req > 0 and not _is_tip_wd:
-        await update.message.reply_text(
-            "⚠️ <b>Withdrawable Balance Unavailable</b>\n\n"
-            "Only deposited funds and eligible tipped deposited balances can be withdrawn. "
-            "Bonus or promotional balances may require wagering before withdrawal.\n\n"
-            f"📊 Wagering remaining: <b>{format_balance_in_currency(wager_req, user_currency)}</b>\n\n"
-            "Play games to fulfill the requirement and unlock your withdrawal.",
+            f"🔒 <b>30-DAY DEPOSIT REQUIRED</b>\n\n{WITHDRAWAL_DEPOSIT_REQUIRED_MESSAGE}",
             parse_mode=ParseMode.HTML
         )
         return
@@ -37408,6 +37395,7 @@ async def withdrawal_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Your current balance: <b>{format_balance_in_currency(balance, user_currency)}</b>\n\n"
         f"Choose from {len(SUPPORTED_CRYPTOCURRENCIES)} supported cryptocurrencies. "
         f"Stablecoins and multi-network coins will ask you to choose a network.\n\n"
+        f"✅ A qualifying deposit in the last 30 days unlocks all balance sources without a wager lock.\n\n"
         f"CC Tip withdrawal is also available below."
     )
 
